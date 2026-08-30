@@ -1,0 +1,14 @@
+node_modules/
+.bun/
+dist/
+drizzle/
+coverage/
+
+.vscode/
+
+config/.env*
+config/config.ts*
+config/*.pem
+config/*.key
+
+.data/

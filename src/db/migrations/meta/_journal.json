@@ -1,0 +1,27 @@
+{
+	"version": "7",
+	"dialect": "sqlite",
+	"entries": [
+		{
+			"idx": 0,
+			"version": "6",
+			"when": 1785377099979,
+			"tag": "0000_nappy_mikhail_rasputin",
+			"breakpoints": true
+		},
+		{
+			"idx": 1,
+			"version": "6",
+			"when": 1785378564821,
+			"tag": "0001_grey_retro_girl",
+			"breakpoints": true
+		},
+		{
+			"idx": 2,
+			"version": "6",
+			"when": 1785417923593,
+			"tag": "0002_retry_thread_create_serialization",
+			"breakpoints": true
+		}
+	]
+}

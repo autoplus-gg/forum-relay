@@ -1,0 +1,269 @@
+name: Release
+run-name: Release v${{ inputs.version }} from ${{ inputs.branch }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without the leading v (for example, 0.2.0)
+        required: true
+        type: string
+      branch:
+        description: Branch to version and release
+        required: true
+        default: main
+        type: string
+      custom_changelog:
+        description: Optional Markdown shown above the generated merged pull requests
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Version commits and tags must be created serially so two manual runs cannot publish the same state.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CUSTOM_CHANGELOG: ${{ inputs.custom_changelog }}
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_BRANCH: ${{ inputs.branch }}
+      VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Validate release
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Version must be a semantic version without a leading v, such as 0.2.0 or 0.2.0-beta.1."
+            exit 1
+          fi
+
+          if ! git ls-remote --exit-code --heads origin "refs/heads/$SOURCE_BRANCH" > /dev/null; then
+            echo "::error::Branch '$SOURCE_BRANCH' does not exist."
+            exit 1
+          fi
+
+          tag="v$VERSION"
+          current_version=$(bun -e 'console.log(require("./package.json").version)')
+
+          if [[ "$current_version" == "$VERSION" ]]; then
+            echo "Package version is already $VERSION; continuing so an interrupted release can be resumed."
+            echo "needs_bump=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_bump=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            echo "::error::Tag '$tag' already exists and cannot be reused."
+            exit 1
+          fi
+
+          echo "expected_head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Bump package version
+        if: steps.release.outputs.needs_bump == 'true'
+        shell: bash
+        run: |
+          bun -e '
+            const path = "package.json";
+            const manifest = await Bun.file(path).json();
+            manifest.version = Bun.env.VERSION;
+            await Bun.write(path, `${JSON.stringify(manifest, null, "\t")}\n`);
+          '
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Prepare config
+        run: bun run prepare:config
+
+      - name: Run release checks
+        run: |
+          bun run check
+          bun run test:coverage
+          bunx drizzle-kit check
+          bun run build
+
+      - name: Create signed version commit
+        if: steps.release.outputs.needs_bump == 'true'
+        id: commit
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ steps.release.outputs.expected_head }}
+        run: |
+          set -euo pipefail
+
+          bump_branch="chore/release-v${VERSION}-${GITHUB_RUN_ID}"
+          gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/heads/$bump_branch" \
+            -f sha="$EXPECTED_HEAD" > /dev/null
+
+          mutation='mutation($input: CreateCommitOnBranchInput!) {
+            createCommitOnBranch(input: $input) {
+              commit { oid url }
+            }
+          }'
+
+          jq -n \
+            --arg query "$mutation" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg branch "$bump_branch" \
+            --arg head "$EXPECTED_HEAD" \
+            --arg version "$VERSION" \
+            --arg contents "$(base64 -w 0 package.json)" \
+            '{
+              query: $query,
+              variables: {
+                input: {
+                  branch: {
+                    repositoryNameWithOwner: $repository,
+                    branchName: $branch
+                  },
+                  expectedHeadOid: $head,
+                  message: {
+                    headline: ("chore: update version to " + $version)
+                  },
+                  fileChanges: {
+                    additions: [{ path: "package.json", contents: $contents }]
+                  }
+                }
+              }
+            }' > mutation.json
+
+          response=$(gh api graphql --input mutation.json)
+          bump_commit=$(jq -er '.data.createCommitOnBranch.commit.oid' <<< "$response")
+          echo "bump_branch=$bump_branch" >> "$GITHUB_OUTPUT"
+          echo "bump_commit=$bump_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Create and merge version pull request
+        if: steps.release.outputs.needs_bump == 'true'
+        id: bump_pr
+        shell: bash
+        env:
+          BUMP_BRANCH: ${{ steps.commit.outputs.bump_branch }}
+          BUMP_COMMIT: ${{ steps.commit.outputs.bump_commit }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          pr_url=$(gh pr create \
+            --base "$SOURCE_BRANCH" \
+            --head "$BUMP_BRANCH" \
+            --title "chore: update version to $VERSION" \
+            --body "Automated version bump for $TAG.")
+
+          gh pr merge "$pr_url" \
+            --squash \
+            --delete-branch \
+            --match-head-commit "$BUMP_COMMIT"
+
+          pr=$(gh pr view "$pr_url" --json state,mergeCommit,url)
+          if [[ "$(jq -r '.state' <<< "$pr")" != "MERGED" ]]; then
+            echo "::error::Version pull request was not merged."
+            exit 1
+          fi
+
+          release_sha=$(jq -er '.mergeCommit.oid' <<< "$pr")
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+          echo "version_pr=$(jq -r '.url' <<< "$pr")" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release commit
+        id: target
+        shell: bash
+        env:
+          BUMP_COMMIT: ${{ steps.bump_pr.outputs.release_sha }}
+          CHECKED_OUT_COMMIT: ${{ steps.release.outputs.expected_head }}
+        run: echo "release_sha=${BUMP_COMMIT:-$CHECKED_OUT_COMMIT}" >> "$GITHUB_OUTPUT"
+
+      - name: Create root-level archive
+        id: archive
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ steps.target.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+
+          archive="forum-relay-v$VERSION.zip"
+          git fetch origin "refs/heads/$SOURCE_BRANCH"
+          git archive --format=zip --output "$archive" "$RELEASE_SHA"
+
+          archived_version=$(unzip -p "$archive" package.json | jq -r '.version')
+          if [[ "$archived_version" != "$VERSION" ]]; then
+            echo "::error::Archive package version is '$archived_version', expected '$VERSION'."
+            exit 1
+          fi
+
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable release
+        id: publish
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.archive.outputs.archive }}
+          RELEASE_SHA: ${{ steps.target.outputs.release_sha }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION_PR: ${{ steps.bump_pr.outputs.version_pr }}
+        run: |
+          set -euo pipefail
+
+          release_flags=(
+            "$TAG"
+            "$ARCHIVE#Source archive (root-level)"
+            --target "$RELEASE_SHA"
+            --title "$VERSION"
+            --generate-notes
+          )
+
+          # GitHub prepends --notes content to generated notes, keeping this section above merged PRs.
+          if [[ -n "${CUSTOM_CHANGELOG//[[:space:]]/}" ]]; then
+            release_flags+=(--notes "$(printf '## Changelog\n\n%s' "$CUSTOM_CHANGELOG")")
+          fi
+
+          if [[ "$VERSION" == *-* ]]; then
+            release_flags+=(--prerelease --latest=false)
+          else
+            release_flags+=(--latest)
+          fi
+
+          gh release create "${release_flags[@]}"
+
+          release=$(gh release view "$TAG" --json isImmutable,url)
+          if [[ "$(jq -r '.isImmutable' <<< "$release")" != "true" ]]; then
+            echo "::error::GitHub published the release without immutability enabled."
+            exit 1
+          fi
+
+          release_url=$(jq -r '.url' <<< "$release")
+          echo "release_url=$release_url" >> "$GITHUB_OUTPUT"
+          echo "### Released [$TAG]($release_url)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Branch: \`$SOURCE_BRANCH\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit: \`$RELEASE_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Archive: \`$ARCHIVE\` (repository contents are at the archive root)" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "$VERSION_PR" ]]; then
+            echo "- Version PR: $VERSION_PR" >> "$GITHUB_STEP_SUMMARY"
+          fi

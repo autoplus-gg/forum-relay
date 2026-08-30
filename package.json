@@ -1,0 +1,66 @@
+{
+	"name": "forum-relay",
+	"version": "0.1.0",
+	"private": true,
+	"license": "Apache-2.0",
+	"description": "Duplex synchronization between Discord forum channels and GitHub Issues.",
+	"type": "module",
+	"main": "./dist/src/index.js",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/autoplus-gg/forum-relay.git"
+	},
+	"bugs": {
+		"url": "https://github.com/autoplus-gg/forum-relay/issues"
+	},
+	"homepage": "https://github.com/autoplus-gg/forum-relay#readme",
+	"engines": {
+		"bun": ">=1.0.0"
+	},
+	"overrides": {
+		"esbuild": "0.25.12"
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit -p tsconfig.json",
+		"check": "tsc --noEmit -p tsconfig.json && biome check .",
+		"test": "bun --bun vitest run",
+		"test:watch": "bun --bun vitest",
+		"test:coverage": "bun --bun vitest run --coverage",
+		"prepare:config": "test -f ./config/config.ts || cp ./config/config.example.ts ./config/config.ts",
+		"lint": "biome lint .",
+		"format": "biome format .",
+		"format:fix": "biome format --write .",
+		"check:fix": "biome check --write .",
+		"drizzle:push": "drizzle-kit push",
+		"deploy": "bun src/deploy-commands.ts",
+		"cli": "bun src/cli.ts",
+		"smoke": "bun src/smoke.ts",
+		"build": "tsc -p tsconfig.build.json && resolve-tspaths -p tsconfig.build.json",
+		"start": "bun src/index.ts"
+	},
+	"dependencies": {
+		"@discordjs/core": "2.5.0",
+		"@discordjs/rest": "^2.6.3",
+		"@discordjs/ws": "^2.0.4",
+		"@libsql/client": "^0.17.4",
+		"@octokit/app": "^16.1.4",
+		"@ticketpm/core": "^0.0.14",
+		"discord-api-types": "^0.38.53",
+		"dotenv": "^17.4.2",
+		"drizzle-orm": "^0.45.2",
+		"parse5": "^8.0.1",
+		"remark-gfm": "^4.0.1",
+		"remark-parse": "^11.0.0",
+		"unified": "^11.0.5"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.11",
+		"@types/bun": "^1.4.0",
+		"@types/node": "^25.9.5",
+		"@vitest/coverage-istanbul": "^4.1.11",
+		"drizzle-kit": "^0.31.10",
+		"resolve-tspaths": "^0.8.23",
+		"typescript": "^6.0.3",
+		"vitest": "^4.1.11"
+	}
+}

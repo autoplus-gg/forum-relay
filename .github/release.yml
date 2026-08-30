@@ -1,0 +1,5 @@
+changelog:
+  exclude:
+    # The automated version bump is an implementation detail, not a user-facing change.
+    authors:
+      - github-actions[bot]

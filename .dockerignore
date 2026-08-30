@@ -1,0 +1,12 @@
+.git
+.github
+.vscode
+node_modules
+.bun
+.data
+coverage
+config/.env*
+config/config.ts*
+config/*.pem
+config/*.key
+dist
